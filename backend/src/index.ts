@@ -3,6 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import http from 'http';
 import https from 'https';
+import { attachWsServer } from './wsManager';
 import fs from 'fs';
 import path from 'path';
 import swaggerUi from 'swagger-ui-express';
@@ -31,6 +32,7 @@ import scanRouter from './routes/scan';
 import detectRouter from './routes/detect';
 import pgRouter from './routes/pg';
 import columnSettingsRouter from './routes/columnSettings';
+import articlesRouter from './routes/articles';
 
 // ── Migrate products/documents from main DB → account DBs (one-time) ────────
 const mainTables = db.prepare(`SELECT name FROM sqlite_master WHERE type='table'`).all() as { name: string }[];
@@ -95,6 +97,7 @@ app.use('/scan', scanRouter);
 app.use('/detect', detectRouter);
 app.use('/pg', pgRouter);
 app.use('/column-settings', columnSettingsRouter);
+app.use('/articles', articlesRouter);
 app.use('/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 app.get('/docs-json', (_req, res) => res.json(swaggerSpec));
 app.get('/health', (_req, res) => res.json({ status: 'ok' }));
@@ -118,19 +121,23 @@ pgPool.query('SELECT 1').then(() => {
 process.on('SIGTERM', () => pgPool.end());
 process.on('SIGINT',  () => pgPool.end());
 
-// ── HTTP server ──────────────────────────────────────────────────────────────
-http.createServer(app).listen(HTTP_PORT, '0.0.0.0', () => {
+// ── HTTP server + WebSocket ───────────────────────────────────────────────────
+const httpServer = http.createServer(app);
+attachWsServer(httpServer, 'HTTP');
+httpServer.listen(HTTP_PORT, '0.0.0.0', () => {
   console.log(`HTTP  → http://0.0.0.0:${HTTP_PORT}`);
 });
 
-// ── HTTPS server (if certs exist) ────────────────────────────────────────────
+// ── HTTPS server + WebSocket (if certs exist) ─────────────────────────────────
 const certsDir = path.join(__dirname, '..', 'certs');
 const keyPath   = path.join(certsDir, 'server.key');
 const certPath  = path.join(certsDir, 'server.crt');
 
 if (fs.existsSync(keyPath) && fs.existsSync(certPath)) {
   const credentials = { key: fs.readFileSync(keyPath), cert: fs.readFileSync(certPath) };
-  https.createServer(credentials, app).listen(HTTPS_PORT, '0.0.0.0', () => {
+  const httpsServer = https.createServer(credentials, app);
+  attachWsServer(httpsServer, 'HTTPS');
+  httpsServer.listen(HTTPS_PORT, '0.0.0.0', () => {
     console.log(`HTTPS → https://0.0.0.0:${HTTPS_PORT}`);
   });
 } else {

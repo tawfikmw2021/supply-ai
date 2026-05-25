@@ -9,6 +9,7 @@ import { useCurrency } from '../composables/useCurrency';
 import { renderInvoiceHtml, printHtml } from '../composables/useInvoicePdf';
 import DataGrid, { type GridColumn } from '../components/DataGrid.vue';
 import api from '../api';
+import { usePhotoInboxStore, type InboxPhoto } from '../stores/photoInbox';
 
 const auth = useAuthStore();
 const store = useInvoicesStore();
@@ -148,6 +149,49 @@ function confirmDetected() {
   detectResults.value = [];
 }
 
+// ── Photo inbox (from mobile camera screen) ───────────────────────────────────
+const inbox            = usePhotoInboxStore();
+const pendingPhotos    = computed(() => inbox.photos);
+const mobilePhotoAlert = ref<InboxPhoto | null>(null);
+
+// When a photo arrives while the invoice modal is open → show inline banner
+watch(pendingPhotos, (photos) => {
+  if (showModal.value && photos.length > 0) {
+    mobilePhotoAlert.value = photos[photos.length - 1];
+  }
+}, { deep: true });
+
+async function usePhotoFromMobile(photo: InboxPhoto) {
+  inbox.dismiss(photo.id);
+  mobilePhotoAlert.value = null;
+  detecting.value  = true;
+  detectError.value = '';
+  try {
+    // Convert data-URL to Blob for multipart upload
+    const res   = await fetch(photo.dataUrl);
+    const blob  = await res.blob();
+    const fd    = new FormData();
+    fd.append('image', blob, 'mobile.jpg');
+    const { data } = await api.post('/detect', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+    if (!data.detected?.length) {
+      detectError.value = 'Aucun produit reconnu dans la photo mobile.';
+    } else {
+      detectResults.value  = data.detected;
+      detectSelected.value = new Set(data.detected.map((p: DetectedProduct) => p.id));
+      showDetectModal.value = true;
+    }
+  } catch (err: any) {
+    detectError.value = err.response?.data?.message ?? 'Erreur détection photo mobile.';
+  } finally {
+    detecting.value = false;
+  }
+}
+
+function dismissMobileAlert() {
+  if (mobilePhotoAlert.value) inbox.dismiss(mobilePhotoAlert.value.id);
+  mobilePhotoAlert.value = null;
+}
+
 function triggerScan() {
   scanError.value = '';
   scanInput.value?.click();
@@ -250,6 +294,68 @@ async function submitForm() {
   } finally {
     modalLoading.value = false;
   }
+}
+
+// ── Article autocomplete ──────────────────────────────
+interface ArticleSug {
+  id: number;
+  code: string | null;
+  nom: string;
+  famille: string | null;
+  marque: string | null;
+  prix_vente_ht: number;
+  stock_total: number;
+}
+
+const activeSuggestIdx = ref<number | null>(null);
+const suggestions      = ref<ArticleSug[]>([]);
+const suggestCursor    = ref(-1);
+let   suggestTimer: ReturnType<typeof setTimeout> | null = null;
+
+function onDescInput(i: number, val: string) {
+  activeSuggestIdx.value = i;
+  suggestCursor.value    = -1;
+  if (suggestTimer) clearTimeout(suggestTimer);
+  if (!val.trim()) { suggestions.value = []; return; }
+  suggestTimer = setTimeout(() => fetchSuggestions(val.trim()), 250);
+}
+
+async function fetchSuggestions(q: string) {
+  try {
+    const { data } = await api.get('/articles', { params: { search: q, limit: 10, page: 1 } });
+    suggestions.value = data.articles ?? [];
+  } catch {
+    suggestions.value = [];
+  }
+}
+
+function onDescKeydown(e: KeyboardEvent, i: number) {
+  if (activeSuggestIdx.value !== i || !suggestions.value.length) return;
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    suggestCursor.value = Math.min(suggestCursor.value + 1, suggestions.value.length - 1);
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    suggestCursor.value = Math.max(suggestCursor.value - 1, -1);
+  } else if (e.key === 'Enter' && suggestCursor.value >= 0) {
+    e.preventDefault();
+    applySuggest(i, suggestions.value[suggestCursor.value]);
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    closeSuggest();
+  }
+}
+
+function applySuggest(lineIdx: number, a: ArticleSug) {
+  form.value.lines[lineIdx].description = a.nom + (a.code ? ` (${a.code})` : '');
+  form.value.lines[lineIdx].unit_price  = Number(a.prix_vente_ht) || 0;
+  closeSuggest();
+}
+
+function closeSuggest() {
+  activeSuggestIdx.value = null;
+  suggestions.value      = [];
+  suggestCursor.value    = -1;
 }
 
 // ── Helpers ───────────────────────────────────────────
@@ -430,6 +536,24 @@ onMounted(() => {
                 <button type="button" class="add-line-btn" @click="addLine">+ Ajouter</button>
               </div>
             </div>
+
+            <!-- Mobile photo notification banner -->
+            <Transition name="photo-alert">
+              <div v-if="mobilePhotoAlert" class="mobile-photo-alert">
+                <img :src="mobilePhotoAlert.dataUrl" class="alert-thumb" alt="Photo mobile" />
+                <div class="alert-body">
+                  <p class="alert-title">📷 Photo reçue depuis le mobile</p>
+                  <p class="alert-sub">{{ mobilePhotoAlert.at.toLocaleTimeString() }}</p>
+                </div>
+                <div class="alert-actions">
+                  <button class="alert-use" @click="usePhotoFromMobile(mobilePhotoAlert)">
+                    Utiliser
+                  </button>
+                  <button class="alert-dismiss" @click="dismissMobileAlert">✕</button>
+                </div>
+              </div>
+            </Transition>
+
             <p v-if="scanError" class="scan-error">{{ scanError }}</p>
             <p v-if="detectError" class="scan-error">{{ detectError }}</p>
             <div class="lines-table-wrap">
@@ -445,7 +569,45 @@ onMounted(() => {
                 </thead>
                 <tbody>
                   <tr v-for="(line, i) in form.lines" :key="i">
-                    <td><input v-model="line.description" placeholder="Description…" class="line-input" /></td>
+                    <td class="desc-cell">
+                      <div class="sug-wrap">
+                        <input
+                          v-model="line.description"
+                          placeholder="Description…"
+                          class="line-input"
+                          autocomplete="off"
+                          @input="onDescInput(i, line.description)"
+                          @focus="activeSuggestIdx = i"
+                          @blur="closeSuggest"
+                          @keydown="onDescKeydown($event, i)"
+                        />
+                        <Transition name="sug-fade">
+                          <ul v-if="activeSuggestIdx === i && suggestions.length" class="sug-dropdown">
+                            <li
+                              v-for="(a, si) in suggestions"
+                              :key="a.id"
+                              class="sug-item"
+                              :class="{ active: suggestCursor === si }"
+                              @mousedown.prevent
+                              @click="applySuggest(i, a)"
+                            >
+                              <div class="sug-main">
+                                <span class="sug-nom">{{ a.nom }}</span>
+                                <span v-if="a.code" class="sug-code">{{ a.code }}</span>
+                              </div>
+                              <div class="sug-meta">
+                                <span v-if="a.famille" class="sug-fam">{{ a.famille }}</span>
+                                <span v-if="a.marque"  class="sug-mar">{{ a.marque }}</span>
+                                <span class="sug-price">{{ formatPrice(a.prix_vente_ht) }}</span>
+                                <span class="sug-stock" :class="{ low: a.stock_total <= 0 }">
+                                  {{ a.stock_total }} en stock
+                                </span>
+                              </div>
+                            </li>
+                          </ul>
+                        </Transition>
+                      </div>
+                    </td>
                     <td><input v-model.number="line.quantity" type="number" min="0" step="0.01"
                         class="line-input num" />
                     </td>
@@ -521,6 +683,8 @@ onMounted(() => {
       </div>
     </div>
   </Transition>
+
+  <!-- ── Mobile scan modal ────────────────────────────────────────────────── -->
 </template>
 
 <style scoped>
@@ -1218,4 +1382,153 @@ textarea {
 }
 .detect-confirm:disabled { opacity: .4; cursor: not-allowed; }
 .detect-confirm:not(:disabled):hover { background: #059669; }
+
+/* ── Mobile photo alert banner ───────────────────────────── */
+.mobile-photo-alert {
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+  background: #eef2ff;
+  border: 1px solid #c7d2fe;
+  border-left: 4px solid #6366f1;
+  border-radius: 10px;
+  padding: .65rem .85rem;
+  margin-bottom: .25rem;
+}
+
+.alert-thumb {
+  width: 48px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: 7px;
+  flex-shrink: 0;
+}
+
+.alert-body { flex: 1; min-width: 0; }
+.alert-title { margin: 0 0 .1rem; font-size: .82rem; font-weight: 700; color: #3730a3; }
+.alert-sub   { margin: 0; font-size: .72rem; color: #6366f1; }
+
+.alert-actions { display: flex; align-items: center; gap: .4rem; flex-shrink: 0; }
+
+.alert-use {
+  padding: .3rem .75rem;
+  background: #6366f1;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  font-size: .78rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.alert-use:hover { background: #4f46e5; }
+
+.alert-dismiss {
+  background: none;
+  border: none;
+  color: #818cf8;
+  cursor: pointer;
+  font-size: .85rem;
+  padding: .2rem;
+}
+.alert-dismiss:hover { color: #4f46e5; }
+
+.photo-alert-enter-active { transition: all .25s ease; }
+.photo-alert-leave-active { transition: all .2s ease; }
+.photo-alert-enter-from   { opacity: 0; transform: translateY(-8px); }
+.photo-alert-leave-to     { opacity: 0; transform: translateX(10px); }
+
+/* ── Article autocomplete ────────────────────────────── */
+.desc-cell { position: relative; }
+
+.sug-wrap { position: relative; }
+
+.sug-dropdown {
+  position: absolute;
+  top: calc(100% + 3px);
+  left: 0;
+  right: 0;
+  min-width: 340px;
+  background: white;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0,0,0,.12);
+  z-index: 500;
+  list-style: none;
+  margin: 0;
+  padding: .25rem 0;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.sug-item {
+  padding: .45rem .75rem;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: .15rem;
+  transition: background .1s;
+}
+.sug-item:hover,
+.sug-item.active { background: #f4f3ff; }
+
+.sug-main {
+  display: flex;
+  align-items: baseline;
+  gap: .5rem;
+}
+.sug-nom {
+  font-size: .88rem;
+  font-weight: 600;
+  color: #1a1a2e;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sug-code {
+  font-size: .72rem;
+  font-family: monospace;
+  color: #888;
+  background: #f5f5f5;
+  padding: .05rem .35rem;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.sug-meta {
+  display: flex;
+  align-items: center;
+  gap: .45rem;
+  flex-wrap: wrap;
+}
+.sug-fam {
+  font-size: .7rem;
+  background: #ede9fe;
+  color: #6c63ff;
+  padding: .05rem .4rem;
+  border-radius: 20px;
+  font-weight: 600;
+}
+.sug-mar {
+  font-size: .7rem;
+  color: #888;
+}
+.sug-price {
+  font-size: .78rem;
+  font-weight: 700;
+  color: #6c63ff;
+  margin-left: auto;
+}
+.sug-stock {
+  font-size: .68rem;
+  color: #aaa;
+  flex-shrink: 0;
+}
+.sug-stock.low { color: #ef4444; font-weight: 600; }
+
+/* dropdown transition */
+.sug-fade-enter-active { transition: opacity .12s, transform .12s; }
+.sug-fade-leave-active { transition: opacity .1s; }
+.sug-fade-enter-from   { opacity: 0; transform: translateY(-4px); }
+.sug-fade-leave-to     { opacity: 0; }
 </style>

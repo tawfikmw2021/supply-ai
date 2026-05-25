@@ -38,6 +38,7 @@ const router = createRouter({
         { path: 'alerts',  component: () => import('../views/AlertsView.vue'),  meta: { requiresAdmin: true } },
         { path: 'column-settings', component: () => import('../views/ColumnSettingsView.vue'), meta: { requiresAdmin: true } },
         { path: 'pg/:table', component: () => import('../views/PgTableView.vue'), meta: { requiresAuth: true } },
+        { path: 'camera', component: () => import('../views/CameraView.vue') },
       ],
     },
     // Root: redirect to last visited route or default

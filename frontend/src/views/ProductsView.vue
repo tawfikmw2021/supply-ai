@@ -1,20 +1,50 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { useAuthStore } from '../stores/auth';
-import { useProductsStore, type Product, type StockMovement } from '../stores/products';
-import { useSuppliersStore } from '../stores/suppliers';
-import { useCategoriesStore } from '../stores/categories';
+import { useArticlesStore, type Article, type ArticleUpdatePayload } from '../stores/articles';
 import { useCurrency } from '../composables/useCurrency';
 import DataGrid, { type GridColumn } from '../components/DataGrid.vue';
 import api from '../api';
 
-const auth = useAuthStore();
-const store = useProductsStore();
-const supStore = useSuppliersStore();
-const catStore = useCategoriesStore();
-const { currency, formatPrice } = useCurrency();
+const auth    = useAuthStore();
+const store   = useArticlesStore();
+const { formatPrice } = useCurrency();
 
-const isAdmin = computed(() => auth.user?.role === 'admin');
+const isAdmin  = computed(() => auth.user?.role === 'admin' && !auth.viewAsUser);
+const apiBase  = import.meta.env.VITE_API_URL ?? 'http://localhost:3100';
+
+// ── Image handling ────────────────────────────────────────
+// Cache-bust counter per article id — incremented after a successful upload
+const imageBusts = ref<Record<number, number>>({});
+
+function imageUrl(a: Article) {
+  const bust = imageBusts.value[a.id] ?? 0;
+  return `${apiBase}/articles/${a.id}/image?token=${auth.token}&_=${bust}`;
+}
+
+const uploadingId = ref<number | null>(null);
+const uploadError = ref('');
+
+async function pickImage(a: Article) {
+  const input = document.createElement('input');
+  input.type   = 'file';
+  input.accept = 'image/*';
+  input.onchange = async () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    uploadingId.value = a.id;
+    uploadError.value = '';
+    try {
+      await store.uploadImage(a.id, file);
+      imageBusts.value = { ...imageBusts.value, [a.id]: Date.now() };
+    } catch (e: any) {
+      uploadError.value = e.response?.data?.message ?? 'Erreur upload';
+    } finally {
+      uploadingId.value = null;
+    }
+  };
+  input.click();
+}
 
 // ── View mode ─────────────────────────────────────────────
 type ViewMode = 'cards' | 'table';
@@ -24,102 +54,56 @@ function setView(mode: ViewMode) {
   localStorage.setItem('productsView', mode);
 }
 
-// ── Card search ───────────────────────────────────────────
-const search = ref('');
-const filtered = computed(() => {
-  const q = search.value.toLowerCase();
-  if (!q) return store.products;
-  return store.products.filter(p =>
-    p.name.toLowerCase().includes(q) ||
-    p.category.toLowerCase().includes(q) ||
-    p.code.toLowerCase().includes(q) ||
-    p.manufacturer.toLowerCase().includes(q) ||
-    p.barcode.toLowerCase().includes(q)
-  );
+// ── Filters ───────────────────────────────────────────────
+const search          = ref('');
+const selectedFamille = ref('');
+const showSommeil     = ref(false);
+let   searchTimer: ReturnType<typeof setTimeout> | null = null;
+
+function load(p = 1) {
+  store.fetchArticles({
+    page:    p,
+    search:  search.value || undefined,
+    famille: selectedFamille.value || undefined,
+    sommeil: showSommeil.value || undefined,
+  });
+}
+
+watch(search, () => {
+  if (searchTimer) clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => load(1), 350);
 });
+watch([selectedFamille, showSommeil], () => load(1));
 
-// ── Add / edit modal ──────────────────────────────────────
-const showForm = ref(false);
-const editingId = ref<number | null>(null);
-const formError = ref('');
-const formLoading = ref(false);
+// ── Pagination ────────────────────────────────────────────
+const totalPages = computed(() => Math.max(1, Math.ceil(store.total / store.limit)));
 
-const emptyForm = () => ({
-  code: '', name: '', category: '', price: 0, sale_price: 0,
-  vat: 20, stock: 0, description: '', manufacturer: '',
-  supplier_id: null as number | null, barcode: '',
-});
-const form = ref(emptyForm());
+// ── DataGrid columns (read-only) ──────────────────────────
+const gridColumns: GridColumn[] = [
+  { key: 'code',          label: 'Code',          type: 'text',     editable: false, width: '110px' },
+  { key: 'nom',           label: 'Désignation',   type: 'text',     editable: false, width: '200px' },
+  { key: 'famille',       label: 'Famille',       type: 'text',     editable: false, width: '130px' },
+  { key: 'marque',        label: 'Marque',        type: 'text',     editable: false, width: '120px' },
+  { key: 'prix_achat_ht', label: 'Achat HT',      type: 'currency', editable: false, width: '110px' },
+  { key: 'prix_vente_ht', label: 'Vente HT',      type: 'currency', editable: false, width: '110px' },
+  { key: 'taux_tva',      label: 'TVA %',         type: 'number',   editable: false, width: '80px'  },
+  { key: 'stock_total',   label: 'Stock',         type: 'number',   editable: false, width: '80px'  },
+  { key: 'code_barre',    label: 'Code-barres',   type: 'text',     editable: false, width: '140px' },
+];
 
-const margin = computed(() => {
-  const pa = Number(form.value.price);
-  const pv = Number(form.value.sale_price);
-  if (!pa) return null;
-  return (((pv - pa) / pa) * 100).toFixed(1);
-});
-
-function openAdd() {
-  editingId.value = null;
-  form.value = emptyForm();
-  formError.value = '';
-  showForm.value = true;
-}
-
-function openEdit(p: Product) {
-  editingId.value = p.id;
-  form.value = {
-    code: p.code ?? '',
-    name: p.name,
-    category: p.category,
-    price: p.price,
-    sale_price: p.sale_price ?? 0,
-    vat: p.vat ?? 20,
-    stock: p.stock,
-    description: p.description,
-    manufacturer: p.manufacturer ?? '',
-    supplier_id: p.supplier_id ?? null,
-    barcode: p.barcode ?? '',
-  };
-  formError.value = '';
-  showForm.value = true;
-}
-
-async function submitForm() {
-  formError.value = '';
-  formLoading.value = true;
-  try {
-    if (editingId.value) {
-      await store.updateProduct(editingId.value, form.value);
-    } else {
-      await store.createProduct(form.value);
-    }
-    //showForm.value = false;
-  } catch (e: any) {
-    formError.value = e.response?.data?.message ?? 'Erreur';
-  } finally {
-    formLoading.value = false;
-  }
-}
-
-function generateBarcode() {
-  const digits = Array.from({ length: 12 }, () => Math.floor(Math.random() * 10));
-  const check = (10 - digits.reduce((s, d, i) => s + d * (i % 2 === 0 ? 1 : 3), 0) % 10) % 10;
-  form.value.barcode = [...digits, check].join('');
-}
-
-// ── Barcode scanner ───────────────────────────────────
-const scannerOpen = ref(false);
-const scannerError = ref('');
-const scannerScanning = ref(false);
-const scannerNotFound = ref(false);
-const scannerAuto = ref(false);
-const scannerVideo = ref<HTMLVideoElement | null>(null);
-const scannerCanvas = document.createElement('canvas');
-let scanStream: MediaStream | null = null;
-let autoTimer: ReturnType<typeof setTimeout> | null = null;
+// ── Barcode scanner (search by barcode) ───────────────────
+const scannerOpen      = ref(false);
+const scannerError     = ref('');
+const scannerScanning  = ref(false);
+const scannerNotFound  = ref(false);
+const scannerAuto      = ref(false);
+const scannerVideo     = ref<HTMLVideoElement | null>(null);
+const scannerCanvas    = document.createElement('canvas');
+let   scanStream: MediaStream | null = null;
+let   autoTimer: ReturnType<typeof setTimeout> | null = null;
 
 async function openScanner() {
-  scannerError.value = '';
+  scannerError.value    = '';
   scannerNotFound.value = false;
   if (!navigator.mediaDevices?.getUserMedia) {
     scannerError.value = 'Caméra non disponible.';
@@ -148,10 +132,10 @@ async function captureAndSend() {
     if (scannerAuto.value) autoTimer = setTimeout(captureAndSend, 800);
     return;
   }
-  scannerScanning.value = true;
-  scannerNotFound.value = false;
+  scannerScanning.value  = true;
+  scannerNotFound.value  = false;
   try {
-    scannerCanvas.width = video.videoWidth;
+    scannerCanvas.width  = video.videoWidth;
     scannerCanvas.height = video.videoHeight;
     scannerCanvas.getContext('2d')!.drawImage(video, 0, 0);
     const blob = await new Promise<Blob | null>(r => scannerCanvas.toBlob(r, 'image/jpeg', 0.9));
@@ -160,8 +144,8 @@ async function captureAndSend() {
     fd.append('image', blob, 'frame.jpg');
     const { data } = await api.post('/scan', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
     if (data.barcode) {
-      form.value.barcode = data.barcode;
       closeScanner();
+      search.value = data.barcode;   // search articles by barcode
       return;
     }
     scannerNotFound.value = true;
@@ -175,18 +159,15 @@ async function captureAndSend() {
 
 function toggleAuto() {
   scannerAuto.value = !scannerAuto.value;
-  if (scannerAuto.value) {
-    captureAndSend();
-  } else {
-    if (autoTimer !== null) { clearTimeout(autoTimer); autoTimer = null; }
-  }
+  if (scannerAuto.value) captureAndSend();
+  else if (autoTimer !== null) { clearTimeout(autoTimer); autoTimer = null; }
 }
 
 function closeScanner() {
-  scannerOpen.value = false;
+  scannerOpen.value     = false;
   scannerScanning.value = false;
   scannerNotFound.value = false;
-  scannerAuto.value = false;
+  scannerAuto.value     = false;
   if (autoTimer !== null) { clearTimeout(autoTimer); autoTimer = null; }
   scanStream?.getTracks().forEach(t => t.stop());
   scanStream = null;
@@ -194,141 +175,78 @@ function closeScanner() {
 
 onUnmounted(closeScanner);
 
-function cancelForm() {
-  if (editingId.value && !window.confirm('Annuler les modifications ?')) return;
-  showForm.value = false;
-}
-
-async function remove(id: number) {
-  if (!confirm('Supprimer cet article ?')) return;
-  await store.deleteProduct(id);
-}
-
-// ── Image upload ──────────────────────────────────────────
-const uploadingId = ref<number | null>(null);
-const uploadError = ref('');
-
-async function pickImage(product: Product) {
-  const input = document.createElement('input');
-  input.type = 'file';
-  input.accept = 'image/*';
-  input.onchange = async () => {
-    const file = input.files?.[0];
-    if (!file) return;
-    uploadingId.value = product.id;
-    uploadError.value = '';
-    try {
-      await store.uploadImage(product.id, file);
-    } catch (e: any) {
-      uploadError.value = e.response?.data?.message ?? 'Erreur upload';
-    } finally {
-      uploadingId.value = null;
-    }
-  };
-  input.click();
-}
-
-// ── Movements modal ───────────────────────────────────────
-const movProduct = ref<Product | null>(null);
-const movements = ref<StockMovement[]>([]);
-const movLoading = ref(false);
-const movForm = ref({ type: 'in', quantity: 1, reason: '' });
-const movSubmitting = ref(false);
-const movError = ref('');
-
-async function openMovements(p: Product) {
-  movProduct.value = p;
-  movLoading.value = true;
-  movError.value = '';
-  try {
-    movements.value = await store.getMovements(p.id);
-  } finally {
-    movLoading.value = false;
-  }
-}
-
-function closeMovements() {
-  movProduct.value = null;
-  movements.value = [];
-  movForm.value = { type: 'in', quantity: 1, reason: '' };
-  movError.value = '';
-}
-
-async function submitMovement() {
-  if (!movProduct.value) return;
-  movSubmitting.value = true;
-  movError.value = '';
-  try {
-    const mov = await store.addMovement(movProduct.value.id, movForm.value);
-    movements.value.unshift(mov);
-    movForm.value = { type: 'in', quantity: 1, reason: '' };
-  } catch (e: any) {
-    movError.value = e.response?.data?.message ?? 'Erreur';
-  } finally {
-    movSubmitting.value = false;
-  }
-}
-
-function movTypeLabel(t: string) {
-  return t === 'in' ? 'Entrée' : t === 'out' ? 'Sortie' : 'Ajustement';
-}
-function movTypeColor(t: string) {
-  return t === 'in' ? '#10b981' : t === 'out' ? '#ef4444' : '#f59e0b';
-}
-function movQtyLabel(m: StockMovement) {
-  if (m.type === 'in') return `+${m.quantity}`;
-  if (m.type === 'out') return `-${m.quantity}`;
-  return m.quantity > 0 ? `+${m.quantity}` : String(m.quantity);
-}
-
-// ── DataGrid ──────────────────────────────────────────────
-const gridColumns = computed<GridColumn[]>(() => [
-  { key: 'code', label: 'Code', type: 'text', editable: isAdmin.value, width: '110px' },
-  { key: 'name', label: 'Désignation', type: 'text', editable: isAdmin.value, width: '180px' },
-  { key: 'category', label: 'Famille', type: 'text', editable: isAdmin.value, width: '120px' },
-  { key: 'manufacturer', label: 'Fabricant', type: 'text', editable: isAdmin.value, width: '130px' },
-  { key: 'price', label: 'Prix achat', type: 'currency', editable: isAdmin.value, width: '110px' },
-  { key: 'sale_price', label: 'Prix vente', type: 'currency', editable: isAdmin.value, width: '110px' },
-  { key: 'vat', label: 'TVA %', type: 'number', editable: isAdmin.value, width: '80px' },
-  { key: 'stock', label: 'Stock', type: 'number', editable: isAdmin.value, width: '80px' },
-  { key: 'barcode', label: 'Code-barres', type: 'text', editable: isAdmin.value, width: '130px' },
-]);
-
-async function onGridUpdate(id: number, field: string, value: any) {
-  await store.updateProduct(id, { [field]: value } as any);
-}
-
-async function onGridDelete(ids: number[]) {
-  if (!confirm(`Supprimer ${ids.length} article${ids.length > 1 ? 's' : ''} ?`)) return;
-  await Promise.all(ids.map(id => store.deleteProduct(id)));
-}
-
-async function onGridDuplicate(ids: number[]) {
-  const originals = store.products.filter(p => ids.includes(p.id));
-  await Promise.all(originals.map(p => store.createProduct({
-    code: '', name: `${p.name} (copie)`, category: p.category,
-    price: p.price, sale_price: p.sale_price, vat: p.vat,
-    stock: 0, description: p.description, manufacturer: p.manufacturer,
-    supplier_id: p.supplier_id, barcode: '',
-  })));
-}
-
 // ── Helpers ───────────────────────────────────────────────
-function categoryColor(name: string): string {
-  return catStore.categories.find(c => c.name === name)?.color ?? '#6c63ff';
+function articleMargin(a: Article) {
+  if (!a.prix_achat_ht) return null;
+  return (((a.prix_vente_ht - a.prix_achat_ht) / a.prix_achat_ht) * 100).toFixed(1);
 }
 
-const apiBase = import.meta.env.VITE_API_URL ?? 'http://localhost:3000';
+function stockClass(a: Article) {
+  if (a.hors_stock) return 'hs';
+  if (a.alerte_stock && a.stock_total <= a.alerte_stock) return 'low';
+  return '';
+}
 
-function productMargin(p: Product) {
-  if (!p.price) return null;
-  return (((p.sale_price - p.price) / p.price) * 100).toFixed(1);
+// ── Edit modal ────────────────────────────────────────────
+const showEdit   = ref(false);
+const editError  = ref('');
+
+const emptyForm = (): ArticleUpdatePayload => ({
+  code: '', nom: '', designation_courte: '', description: '', code_barre: '',
+  prix_achat_ht: 0, prix_vente_ht: 0, prix_achat_ttc: 0, prix_vente_ttc: 0,
+  id_famille: null, id_marque: null, id_tva: null,
+  hors_stock: 0, sommeil: 0, alerte_stock: null,
+});
+
+const form      = ref<ArticleUpdatePayload>(emptyForm());
+const editingId = ref<number | null>(null);
+
+const editMargin = computed(() => {
+  const pa = Number(form.value.prix_achat_ht);
+  const pv = Number(form.value.prix_vente_ht);
+  if (!pa) return null;
+  return (((pv - pa) / pa) * 100).toFixed(1);
+});
+
+function openEdit(a: Article) {
+  editingId.value = a.id;
+  form.value = {
+    code:               a.code               ?? '',
+    nom:                a.nom,
+    designation_courte: a.designation_courte ?? '',
+    description:        a.description        ?? '',
+    code_barre:         a.code_barre         ?? '',
+    prix_achat_ht:      a.prix_achat_ht,
+    prix_vente_ht:      a.prix_vente_ht,
+    prix_achat_ttc:     a.prix_achat_ttc,
+    prix_vente_ttc:     a.prix_vente_ttc,
+    id_famille:         a.id_famille,
+    id_marque:          a.id_marque,
+    id_tva:             a.id_tva,
+    hors_stock:         a.hors_stock  ?? 0,
+    sommeil:            a.sommeil     ?? 0,
+    alerte_stock:       a.alerte_stock,
+  };
+  editError.value = '';
+  showEdit.value  = true;
+}
+
+async function submitEdit() {
+  if (!editingId.value) return;
+  editError.value = '';
+  try {
+    await store.updateArticle(editingId.value, form.value);
+    showEdit.value = false;
+  } catch (e: any) {
+    editError.value = e.response?.data?.message ?? 'Erreur lors de la sauvegarde';
+  }
 }
 
 onMounted(() => {
-  store.fetchProducts();
-  supStore.fetchSuppliers();
-  catStore.fetchCategories();
+  load(1);
+  store.fetchFamilles();
+  store.fetchMarques();
+  store.fetchTvas();
 });
 </script>
 
@@ -338,116 +256,173 @@ onMounted(() => {
     <header class="topbar">
       <h1>Catalogue articles</h1>
       <div class="topbar-right">
-        <button v-if="isAdmin" class="add-btn" @click="openAdd">+ Ajouter</button>
         <div class="view-toggle">
           <button class="toggle-btn" :class="{ active: viewMode === 'cards' }" title="Vue cartes"
             @click="setView('cards')">
             <svg viewBox="0 0 20 20" fill="currentColor" width="16" height="16">
-              <path
-                d="M5 3a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2V5a2 2 0 00-2-2H5zM5 11a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2v-2a2 2 0 00-2-2H5zM11 5a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V5zM11 13a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
+              <path d="M5 3a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2V5a2 2 0 00-2-2H5zM5 11a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2v-2a2 2 0 00-2-2H5zM11 5a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V5zM11 13a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
             </svg>
           </button>
           <button class="toggle-btn" :class="{ active: viewMode === 'table' }" title="Vue tableau"
             @click="setView('table')">
             <svg viewBox="0 0 20 20" fill="currentColor" width="16" height="16">
-              <path fill-rule="evenodd"
-                d="M5 4a3 3 0 00-3 3v6a3 3 0 003 3h10a3 3 0 003-3V7a3 3 0 00-3-3H5zm-1 9v-1h5v2H5a1 1 0 01-1-1zm7 1h4a1 1 0 001-1v-1h-5v2zm5-4h-5V8h5v2zM9 8H4v2h5V8z"
-                clip-rule="evenodd" />
+              <path fill-rule="evenodd" d="M5 4a3 3 0 00-3 3v6a3 3 0 003 3h10a3 3 0 003-3V7a3 3 0 00-3-3H5zm-1 9v-1h5v2H5a1 1 0 01-1-1zm7 1h4a1 1 0 001-1v-1h-5v2zm5-4h-5V8h5v2zM9 8H4v2h5V8z" clip-rule="evenodd" />
             </svg>
           </button>
         </div>
       </div>
     </header>
 
-    <!-- Card view -->
-    <template v-if="viewMode === 'cards'">
-      <div class="toolbar">
-        <input v-model="search" type="search" placeholder="Rechercher par nom, code, famille, fabricant…"
-          class="search" />
-        <span class="count">{{ filtered.length }} article{{ filtered.length !== 1 ? 's' : '' }}</span>
+    <!-- Toolbar -->
+    <div class="toolbar">
+      <div class="search-wrap">
+        <input v-model="search" type="search"
+          placeholder="Rechercher nom, code, code-barres, marque…" class="search" />
+        <button class="scan-search-btn" title="Scanner un code-barres" @click="openScanner">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+            <path d="M3 9V5a2 2 0 012-2h4M3 15v4a2 2 0 002 2h4M21 9V5a2 2 0 00-2-2h-4M21 15v4a2 2 0 01-2 2h-4M8 12h8"/>
+          </svg>
+        </button>
       </div>
 
-      <p v-if="store.loading" class="empty">Chargement…</p>
+      <select v-model="selectedFamille" class="sel famille-sel">
+        <option value="">Toutes les familles</option>
+        <option v-for="f in store.familles" :key="f.id" :value="String(f.id)">{{ f.libelle }}</option>
+      </select>
 
-      <div v-else class="grid">
-        <div v-for="product in filtered" :key="product.id" class="card">
+      <label class="sommeil-toggle">
+        <input type="checkbox" v-model="showSommeil" />
+        <span>Inactifs</span>
+      </label>
+
+      <span class="count">
+        {{ store.total.toLocaleString() }} article{{ store.total !== 1 ? 's' : '' }}
+      </span>
+    </div>
+
+    <!-- Loading -->
+    <p v-if="store.loading && !store.articles.length" class="empty">Chargement…</p>
+
+    <!-- Card view -->
+    <template v-if="viewMode === 'cards'">
+      <div v-if="store.articles.length" class="grid" :class="{ dimmed: store.loading }">
+        <div v-for="a in store.articles" :key="a.id" class="card"
+          :class="{ inactive: a.sommeil, hs: a.hors_stock }">
+
+          <!-- Photo / placeholder -->
           <div class="img-wrap">
-            <img v-if="product.document?.url" :src="apiBase + product.document.url" :alt="product.name"
-              class="product-img" />
-            <div v-else class="img-placeholder"><span>{{ product.name[0] }}</span></div>
-            <button v-if="isAdmin" class="upload-btn" :disabled="uploadingId === product.id"
-              @click="pickImage(product)">
-              {{ uploadingId === product.id ? '…' : '📷' }}
+            <img v-if="a.has_image" :src="imageUrl(a)" :alt="a.nom" class="product-img" />
+            <div v-else class="img-placeholder">
+              <span>{{ a.nom?.[0] ?? '?' }}</span>
+            </div>
+
+            <!-- upload button (admin) -->
+            <button v-if="isAdmin" class="upload-btn"
+              :disabled="uploadingId === a.id"
+              :title="a.has_image ? 'Changer la photo' : 'Ajouter une photo'"
+              @click.stop="pickImage(a)">
+              {{ uploadingId === a.id ? '…' : '📷' }}
             </button>
-            <span v-if="product.code" class="code-chip">{{ product.code }}</span>
+
+            <span v-if="a.code" class="code-chip">{{ a.code }}</span>
+            <span v-if="a.sommeil"         class="status-chip sommeil-chip">Inactif</span>
+            <span v-else-if="a.hors_stock" class="status-chip hs-chip">Hors stock</span>
           </div>
 
+          <!-- Family + stock -->
           <div class="card-header">
-            <span class="badge" :style="{ background: categoryColor(product.category) }">{{
-              product.category }}</span>
-            <span class="stock" :class="{ low: product.stock < 10 }">{{ product.stock.toLocaleString() }} en
-              stock</span>
+            <span v-if="a.famille" class="badge fam-badge">{{ a.famille }}</span>
+            <span v-else class="badge fam-badge grey">—</span>
+            <span class="stock" :class="stockClass(a)">
+              {{ Number(a.stock_total).toLocaleString('fr-FR') }} en stock
+            </span>
           </div>
 
-          <h2>{{ product.name }}</h2>
+          <!-- Name -->
+          <h2 :title="a.nom">{{ a.nom }}</h2>
+
+          <!-- Meta -->
           <div class="card-meta">
-            <span v-if="product.manufacturer" class="meta-mfr">{{ product.manufacturer }}</span>
-            <span v-if="product.supplier" class="meta-sup">{{ product.supplier.name }}</span>
+            <span v-if="a.marque" class="meta-mfr">{{ a.marque }}</span>
+            <span v-if="a.designation_courte" class="meta-des">{{ a.designation_courte }}</span>
           </div>
 
+          <!-- Prices -->
           <div class="prices">
             <div class="price-block">
-              <span class="price-label">Achat</span>
-              <span class="price-val">{{ formatPrice(product.price) }}</span>
+              <span class="price-label">Achat HT</span>
+              <span class="price-val">{{ formatPrice(a.prix_achat_ht) }}</span>
             </div>
             <div class="price-sep">→</div>
             <div class="price-block">
-              <span class="price-label">Vente</span>
-              <span class="price-val accent">{{ formatPrice(product.sale_price) }}</span>
+              <span class="price-label">Vente HT</span>
+              <span class="price-val accent">{{ formatPrice(a.prix_vente_ht) }}</span>
             </div>
-            <div v-if="productMargin(product) !== null" class="price-block">
+            <div v-if="articleMargin(a) !== null" class="price-block">
               <span class="price-label">Marge</span>
-              <span class="price-val" :class="Number(productMargin(product)) >= 0 ? 'pos' : 'neg'">
-                {{ productMargin(product) }}%
+              <span class="price-val" :class="Number(articleMargin(a)) >= 0 ? 'pos' : 'neg'">
+                {{ articleMargin(a) }}%
               </span>
+            </div>
+            <div v-if="a.taux_tva !== null" class="price-block">
+              <span class="price-label">TVA</span>
+              <span class="price-val tva">{{ a.taux_tva }}%</span>
             </div>
           </div>
 
-          <p v-if="product.description" class="desc">{{ product.description }}</p>
+          <p v-if="a.code_barre" class="barcode-line">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"
+              width="12" height="12" style="flex-shrink:0">
+              <rect x="4" y="4" width="1.5" height="16"/><rect x="7" y="4" width="1" height="16"/>
+              <rect x="10" y="4" width="2" height="16"/><rect x="14" y="4" width="1" height="16"/>
+              <rect x="17" y="4" width="1.5" height="16"/>
+            </svg>
+            {{ a.code_barre }}
+          </p>
 
-          <div class="card-footer">
-            <button v-if="isAdmin" class="mov-btn" @click="openMovements(product)" title="Mouvements de stock">
-              📦 Mouvements
-            </button>
-            <div v-if="isAdmin" class="admin-actions">
-              <button class="edit-btn" @click="openEdit(product)">Modifier</button>
-              <button class="del-btn" @click="remove(product.id)">Supprimer</button>
-            </div>
+          <div v-if="isAdmin" class="card-footer">
+            <button class="edit-btn" @click="openEdit(a)">✏️ Modifier</button>
           </div>
         </div>
       </div>
 
-      <p v-if="!store.loading && filtered.length === 0" class="empty">Aucun article trouvé.</p>
+      <p v-if="!store.loading && !store.articles.length" class="empty">Aucun article trouvé.</p>
       <p v-if="uploadError" class="upload-error">{{ uploadError }}</p>
     </template>
 
     <!-- Table view -->
     <template v-else>
-      <DataGrid :columns="gridColumns" :rows="store.products" :loading="store.loading" :format-price="formatPrice"
-        @update="onGridUpdate" @delete="onGridDelete" @duplicate="onGridDuplicate" />
-      <p v-if="uploadError" class="upload-error">{{ uploadError }}</p>
+      <DataGrid
+        :columns="gridColumns"
+        :rows="store.articles"
+        :loading="store.loading"
+        :format-price="formatPrice"
+      />
     </template>
 
-    <!-- ── Add / Edit modal ─────────────────────────────── -->
-    <div v-if="showForm" class="overlay">
+    <!-- Pagination -->
+    <div v-if="totalPages > 1" class="pagination">
+      <button class="page-btn" :disabled="store.page <= 1" @click="load(store.page - 1)">‹</button>
+      <template v-for="p in totalPages" :key="p">
+        <button v-if="Math.abs(p - store.page) <= 2 || p === 1 || p === totalPages"
+          class="page-btn" :class="{ active: p === store.page }" @click="load(p)">
+          {{ p }}
+        </button>
+        <span v-else-if="p === store.page - 3 || p === store.page + 3" class="page-ellipsis">…</span>
+      </template>
+      <button class="page-btn" :disabled="store.page >= totalPages" @click="load(store.page + 1)">›</button>
+      <span class="page-info">Page {{ store.page }} / {{ totalPages }}</span>
+    </div>
+
+    <!-- ── Edit modal ─────────────────────────────────────── -->
+    <div v-if="showEdit" class="overlay" @click.self="showEdit = false">
       <div class="modal">
-        <div style="display: flex; justify-content: space-between; align-items: center;">
-          <h2>{{ editingId ? 'Modifier l\'article' : 'Nouvel article' }}</h2>
-          <!--span
-            style="border: solid 1px; padding: 2px; border-radius: 50%; background-color: red; cursor: pointer;text-align: right;"
-            @click="showForm = false">x</span-->
+        <div class="modal-header">
+          <h2>Modifier l'article</h2>
+          <button class="close-btn" @click="showEdit = false">✕</button>
         </div>
-        <form @submit.prevent="submitForm" class="form-body">
+
+        <form @submit.prevent="submitEdit" class="form-body">
 
           <!-- Identification -->
           <div class="form-section-title">Identification</div>
@@ -457,84 +432,100 @@ onMounted(() => {
               <input v-model="form.code" placeholder="Ex: ART-001" />
             </div>
             <div>
-              <label>Code à barre</label>
-              <div class="input-with-btn">
-                <input v-model="form.barcode" placeholder="EAN-13…" />
-                <button type="button" class="gen-btn" @click="generateBarcode"
-                  title="Générer un code à barre">Générer</button>
-                <button type="button" class="gen-btn scan-btn" @click="openScanner"
-                  title="Lire un code à barre">📷</button>
-              </div>
-              <p v-if="scannerError" class="error" style="margin-top:.25rem">{{ scannerError }}</p>
+              <label>Code-barres</label>
+              <input v-model="form.code_barre" placeholder="EAN-13…" />
             </div>
           </div>
 
           <!-- Désignation -->
           <div class="form-section-title">Désignation</div>
           <label>Nom <span class="req">*</span></label>
-          <input v-model="form.name" required placeholder="Nom de l'article" />
-          <label>Famille <span class="req">*</span></label>
-          <select v-model="form.category" required class="sel">
-            <option value="" disabled>— Choisir une famille —</option>
-            <option v-for="c in catStore.categories" :key="c.id" :value="c.name">{{ c.name }}</option>
-          </select>
+          <input v-model="form.nom" required placeholder="Nom de l'article" />
+          <label>Désignation courte</label>
+          <input v-model="form.designation_courte" placeholder="Désignation abrégée…" />
           <label>Description</label>
           <textarea v-model="form.description" rows="2" placeholder="Description…"></textarea>
 
-          <!-- Prix -->
-          <div class="form-section-title">Prix</div>
+          <!-- Famille / Marque / TVA -->
+          <div class="form-section-title">Classification</div>
           <div class="row3">
             <div>
-              <label>Prix d'achat ({{ currency }}) <span class="req">*</span></label>
-              <input v-model.number="form.price" type="number" step="0.01" min="0" required />
-            </div>
-            <div>
-              <label>Prix de vente ({{ currency }})</label>
-              <input v-model.number="form.sale_price" type="number" step="0.01" min="0" />
-            </div>
-            <div>
-              <label>TVA (%)</label>
-              <select v-model.number="form.vat" class="sel">
-                <option :value="0">0%</option>
-                <option :value="5.5">5.5%</option>
-                <option :value="10">10%</option>
-                <option :value="20">20%</option>
-              </select>
-            </div>
-          </div>
-          <div v-if="margin !== null" class="margin-preview">
-            Marge : <strong :class="Number(margin) >= 0 ? 'pos' : 'neg'">{{ margin }}%</strong>
-          </div>
-
-          <!-- Fournisseur & Fabricant -->
-          <div class="form-section-title">Origine</div>
-          <div class="row2">
-            <div>
-              <label>Fournisseur</label>
-              <select v-model.number="form.supplier_id" class="sel">
-                <option :value="null">— Aucun —</option>
-                <option v-for="s in supStore.suppliers" :key="s.id" :value="s.id">{{ s.name }}</option>
+              <label>Famille</label>
+              <select v-model.number="form.id_famille" class="sel">
+                <option :value="null">— Aucune —</option>
+                <option v-for="f in store.familles" :key="f.id" :value="f.id">{{ f.libelle }}</option>
               </select>
             </div>
             <div>
-              <label>Fabricant</label>
-              <input v-model="form.manufacturer" placeholder="Ex: Bosch, 3M…" />
+              <label>Marque</label>
+              <select v-model.number="form.id_marque" class="sel">
+                <option :value="null">— Aucune —</option>
+                <option v-for="m in store.marques" :key="m.id" :value="m.id">{{ m.libelle }}</option>
+              </select>
+            </div>
+            <div>
+              <label>TVA</label>
+              <select v-model.number="form.id_tva" class="sel">
+                <option :value="null">— Aucune —</option>
+                <option v-for="t in store.tvas" :key="t.id" :value="t.id">{{ t.taux }}%</option>
+              </select>
             </div>
           </div>
 
-          <!-- Stock -->
-          <div class="form-section-title">Stock</div>
+          <!-- Prix -->
+          <div class="form-section-title">Prix</div>
           <div class="row2">
             <div>
-              <label>Quantité en stock</label>
-              <input v-model.number="form.stock" type="number" min="0" required />
+              <label>Prix achat HT</label>
+              <input v-model.number="form.prix_achat_ht" type="number" step="0.001" min="0" />
+            </div>
+            <div>
+              <label>Prix vente HT</label>
+              <input v-model.number="form.prix_vente_ht" type="number" step="0.001" min="0" />
+            </div>
+          </div>
+          <div class="row2">
+            <div>
+              <label>Prix achat TTC</label>
+              <input v-model.number="form.prix_achat_ttc" type="number" step="0.001" min="0" />
+            </div>
+            <div>
+              <label>Prix vente TTC</label>
+              <input v-model.number="form.prix_vente_ttc" type="number" step="0.001" min="0" />
+            </div>
+          </div>
+          <div v-if="editMargin !== null" class="margin-preview">
+            Marge : <strong :class="Number(editMargin) >= 0 ? 'pos' : 'neg'">{{ editMargin }}%</strong>
+          </div>
+
+          <!-- Options -->
+          <div class="form-section-title">Options</div>
+          <div class="row2">
+            <div>
+              <label>Alerte stock (qté min)</label>
+              <input v-model.number="form.alerte_stock" type="number" min="0" placeholder="—" />
+            </div>
+            <div class="flags-col">
+              <label class="flag-label">
+                <input type="checkbox" :checked="!!form.hors_stock"
+                  @change="form.hors_stock = ($event.target as HTMLInputElement).checked ? 1 : 0" />
+                Hors stock
+              </label>
+              <label class="flag-label">
+                <input type="checkbox" :checked="!!form.sommeil"
+                  @change="form.sommeil = ($event.target as HTMLInputElement).checked ? 1 : 0" />
+                Inactif (sommeil)
+              </label>
             </div>
           </div>
 
-          <p v-if="formError" class="error">{{ formError }}</p>
+          <p v-if="editError" class="error">{{ editError }}</p>
+
           <div class="modal-footer">
-            <button type="button" class="cancel-btn" @click="cancelForm">Annuler</button>
-            <button type="submit" :disabled="formLoading">{{ formLoading ? '…' : 'Enregistrer' }}</button>
+            <button type="button" class="cancel-btn" @click="showEdit = false">Annuler</button>
+            <button type="submit" :disabled="store.saving">
+              {{ store.saving ? '…' : 'Enregistrer' }}
+            </button>
           </div>
         </form>
       </div>
@@ -544,7 +535,7 @@ onMounted(() => {
     <div v-if="scannerOpen" class="overlay scanner-overlay">
       <div class="scanner-box">
         <div class="scanner-header">
-          <span>Pointez la caméra vers un code à barre</span>
+          <span>Pointez la caméra vers un code-barres</span>
           <button class="close-btn" @click="closeScanner">✕</button>
         </div>
         <div class="scanner-viewport">
@@ -552,78 +543,19 @@ onMounted(() => {
           <div class="scanner-aim" />
         </div>
         <div class="scanner-footer">
-          <p v-if="scannerNotFound && !scannerAuto" class="scanner-not-found">Aucun code détecté — réessayez</p>
+          <p v-if="scannerNotFound && !scannerAuto" class="scanner-not-found">
+            Aucun code détecté — réessayez
+          </p>
+          <p v-if="scannerError" class="scanner-not-found">{{ scannerError }}</p>
           <div class="scanner-actions">
-            <button class="scanner-capture-btn" :disabled="scannerScanning || scannerAuto" @click="captureAndSend">
+            <button class="scanner-capture-btn" :disabled="scannerScanning || scannerAuto"
+              @click="captureAndSend">
               {{ scannerScanning && !scannerAuto ? '🔍 Analyse…' : '📸 Capturer' }}
             </button>
             <button class="scanner-auto-btn" :class="{ active: scannerAuto }" @click="toggleAuto">
               {{ scannerAuto ? '⏹ Stop auto' : '🔄 Auto' }}
             </button>
           </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- ── Movements modal ──────────────────────────────── -->
-    <div v-if="movProduct" class="overlay" @click.self="closeMovements">
-      <div class="modal mov-modal">
-        <div class="mov-header">
-          <div>
-            <h2>Mouvements de stock</h2>
-            <p class="mov-subtitle">{{ movProduct.name }} — stock actuel : <strong>{{ movProduct.stock }}</strong></p>
-          </div>
-          <button class="close-btn" @click="closeMovements">✕</button>
-        </div>
-
-        <!-- Add movement form (admin) -->
-        <div v-if="isAdmin" class="mov-form">
-          <select v-model="movForm.type" class="sel sel-sm">
-            <option value="in">📥 Entrée</option>
-            <option value="out">📤 Sortie</option>
-            <option value="adjustment">⚖️ Ajustement</option>
-          </select>
-          <input v-model.number="movForm.quantity" type="number" :step="1"
-            :placeholder="movForm.type === 'adjustment' ? 'Qté (±)' : 'Quantité'" class="mov-qty" />
-          <input v-model="movForm.reason" placeholder="Motif (optionnel)" class="mov-reason" />
-          <button class="mov-submit" :disabled="movSubmitting" @click="submitMovement">
-            {{ movSubmitting ? '…' : 'Ajouter' }}
-          </button>
-        </div>
-        <p v-if="movError" class="error" style="padding: 0 1.25rem .5rem;">{{ movError }}</p>
-
-        <!-- History -->
-        <div class="mov-list">
-          <p v-if="movLoading" class="mov-empty">Chargement…</p>
-          <p v-else-if="movements.length === 0" class="mov-empty">Aucun mouvement enregistré.</p>
-          <table v-else class="mov-table">
-            <thead>
-              <tr>
-                <th>Date</th>
-                <th>Type</th>
-                <th>Qté</th>
-                <th>Motif</th>
-                <th>Utilisateur</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="m in movements" :key="m.id">
-                <td class="mov-date">{{ new Date(m.created_at).toLocaleString('fr-FR', {
-                  dateStyle: 'short', timeStyle:
-                    'short'
-                }) }}</td>
-                <td>
-                  <span class="mov-badge"
-                    :style="{ color: movTypeColor(m.type), background: movTypeColor(m.type) + '1a' }">
-                    {{ movTypeLabel(m.type) }}
-                  </span>
-                </td>
-                <td class="mov-qty-cell" :style="{ color: movTypeColor(m.type) }">{{ movQtyLabel(m) }}</td>
-                <td class="mov-reason-cell">{{ m.reason || '—' }}</td>
-                <td class="mov-user">{{ m.user_name || '—' }}</td>
-              </tr>
-            </tbody>
-          </table>
         </div>
       </div>
     </div>
@@ -645,34 +577,16 @@ onMounted(() => {
   align-items: center;
   margin-bottom: 1.25rem;
 }
-
 .topbar h1 {
   margin: 0;
   font-size: 1.5rem;
   color: #1a1a2e;
 }
-
 .topbar-right {
   display: flex;
   align-items: center;
   gap: .75rem;
 }
-
-.add-btn {
-  padding: .4rem .9rem;
-  background: #6c63ff;
-  color: white;
-  border: none;
-  border-radius: 8px;
-  cursor: pointer;
-  font-size: .875rem;
-  font-weight: 600;
-}
-
-.add-btn:hover {
-  opacity: .9;
-}
-
 .view-toggle {
   display: flex;
   border: 1px solid #ddd;
@@ -680,7 +594,6 @@ onMounted(() => {
   overflow: clip;
   background: white;
 }
-
 .toggle-btn {
   display: flex;
   align-items: center;
@@ -692,290 +605,268 @@ onMounted(() => {
   cursor: pointer;
   transition: background .15s, color .15s;
 }
-
-.toggle-btn:hover {
-  background: #f5f5f5;
-  color: #555;
-}
-
-.toggle-btn.active {
-  background: #6c63ff;
-  color: white;
-}
-
-.toggle-btn:not(:last-child) {
-  border-right: 1px solid #ddd;
-}
+.toggle-btn:hover  { background: #f5f5f5; color: #555; }
+.toggle-btn.active { background: #6c63ff; color: white; }
+.toggle-btn:not(:last-child) { border-right: 1px solid #ddd; }
 
 /* ── Toolbar ─────────────────────────────────────────── */
 .toolbar {
   display: flex;
   align-items: center;
-  gap: 1rem;
+  gap: .75rem;
   margin-bottom: 1.5rem;
+  flex-wrap: wrap;
 }
-
-.search {
+.search-wrap {
+  display: flex;
+  align-items: center;
   flex: 1;
   max-width: 420px;
-  padding: .6rem .85rem;
   border: 1px solid #ddd;
   border-radius: 8px;
-  font-size: .95rem;
   background: white;
+  overflow: hidden;
 }
-
-.search:focus {
+.search {
+  flex: 1;
+  padding: .6rem .85rem;
+  border: none;
+  font-size: .95rem;
+  background: transparent;
   outline: none;
-  border-color: #6c63ff;
 }
+.search-wrap:focus-within { border-color: #6c63ff; }
+.scan-search-btn {
+  padding: .4rem .6rem;
+  border: none;
+  background: transparent;
+  color: #888;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+}
+.scan-search-btn:hover { color: #6c63ff; }
+
+.famille-sel {
+  padding: .55rem .7rem;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  font-size: .875rem;
+  background: white;
+  min-width: 160px;
+  cursor: pointer;
+}
+.famille-sel:focus { outline: none; border-color: #6c63ff; }
+
+.sommeil-toggle {
+  display: flex;
+  align-items: center;
+  gap: .35rem;
+  font-size: .85rem;
+  color: #555;
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+}
+.sommeil-toggle input { cursor: pointer; }
 
 .count {
   font-size: .875rem;
   color: #888;
+  white-space: nowrap;
 }
 
 /* ── Cards ───────────────────────────────────────────── */
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   gap: 1rem;
+  transition: opacity .2s;
 }
+.grid.dimmed { opacity: .55; pointer-events: none; }
 
 .card {
   background: white;
   border-radius: 12px;
   overflow: hidden;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, .07);
+  box-shadow: 0 2px 8px rgba(0,0,0,.07);
   display: flex;
   flex-direction: column;
 }
+.card.inactive { opacity: .7; }
+.card.hs { border-left: 3px solid #ef4444; }
 
 .img-wrap {
   position: relative;
-  height: 150px;
-  background: #f7f8ff;
+  height: 100px;
+  background: #f0f0ff;
 }
-
 .product-img {
   width: 100%;
   height: 100%;
   object-fit: cover;
+  display: block;
 }
-
 .img-placeholder {
   width: 100%;
   height: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 3rem;
+  font-size: 2.2rem;
   font-weight: 700;
   color: #c7c3ff;
-  background: #f0f0ff;
 }
-
 .upload-btn {
   position: absolute;
-  bottom: .5rem;
-  right: .5rem;
-  background: rgba(0, 0, 0, .55);
+  bottom: .4rem;
+  right: .4rem;
+  background: rgba(0,0,0,.55);
   color: white;
   border: none;
   border-radius: 6px;
-  padding: .25rem .5rem;
+  padding: .2rem .45rem;
+  font-size: .8rem;
   cursor: pointer;
-  font-size: .85rem;
+  line-height: 1.4;
 }
-
-.upload-btn:hover {
-  background: rgba(0, 0, 0, .8);
-}
-
-.upload-btn:disabled {
-  opacity: .5;
-  cursor: not-allowed;
-}
-
+.upload-btn:hover    { background: rgba(0,0,0,.8); }
+.upload-btn:disabled { opacity: .5; cursor: not-allowed; }
 .code-chip {
   position: absolute;
   top: .5rem;
   left: .5rem;
-  background: rgba(0, 0, 0, .6);
+  background: rgba(0,0,0,.55);
   color: white;
   font-size: .7rem;
   font-family: monospace;
   padding: .15rem .4rem;
   border-radius: 4px;
 }
+.status-chip {
+  position: absolute;
+  top: .5rem;
+  right: .5rem;
+  font-size: .65rem;
+  font-weight: 700;
+  padding: .15rem .45rem;
+  border-radius: 20px;
+}
+.sommeil-chip { background: #fef9c3; color: #854d0e; }
+.hs-chip      { background: #fee2e2; color: #b91c1c; }
 
 .card-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: .65rem 1rem .2rem;
+  padding: .6rem 1rem .15rem;
 }
-
 .badge {
-  font-size: .72rem;
+  font-size: .7rem;
   font-weight: 600;
   color: white;
-  padding: .2rem .6rem;
+  padding: .18rem .55rem;
   border-radius: 20px;
+  background: #6c63ff;
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
+.badge.grey { background: #ccc; }
 
-.stock {
-  font-size: .75rem;
-  color: #888;
-}
-
-.stock.low {
-  color: #ef4444;
-  font-weight: 600;
-}
+.stock { font-size: .74rem; color: #888; }
+.stock.low { color: #ef4444; font-weight: 600; }
+.stock.hs  { color: #b45309; font-weight: 600; }
 
 .card h2 {
-  margin: 0 0 .2rem;
-  font-size: .95rem;
+  margin: 0 0 .15rem;
+  font-size: .92rem;
   color: #1a1a2e;
   padding: 0 1rem;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
 }
-
 .card-meta {
   display: flex;
   flex-wrap: wrap;
-  gap: .3rem;
-  padding: 0 1rem .3rem;
+  gap: .25rem;
+  padding: 0 1rem .25rem;
 }
-
 .meta-mfr {
-  font-size: .73rem;
+  font-size: .72rem;
   color: #6c63ff;
   font-weight: 600;
 }
-
-.meta-sup {
-  font-size: .73rem;
+.meta-des {
+  font-size: .72rem;
   color: #888;
 }
-
-.meta-mfr+.meta-sup::before {
-  content: '·';
-  margin-right: .3rem;
-}
+.meta-mfr + .meta-des::before { content: '·'; margin-right: .25rem; }
 
 .prices {
   display: flex;
   align-items: center;
-  gap: .4rem;
-  padding: .3rem 1rem .4rem;
+  gap: .35rem;
+  padding: .25rem 1rem .3rem;
+  flex-wrap: wrap;
 }
-
 .price-block {
   display: flex;
   flex-direction: column;
   align-items: center;
 }
-
 .price-label {
-  font-size: .65rem;
+  font-size: .62rem;
   color: #aaa;
   text-transform: uppercase;
   letter-spacing: .04em;
 }
+.price-val          { font-size: .82rem; font-weight: 700; color: #333; }
+.price-val.accent   { color: #6c63ff; }
+.price-val.pos      { color: #10b981; }
+.price-val.neg      { color: #ef4444; }
+.price-val.tva      { color: #888; font-weight: 600; }
+.price-sep          { font-size: .7rem; color: #ddd; margin-top: .8rem; }
 
-.price-val {
-  font-size: .85rem;
-  font-weight: 700;
-  color: #333;
-}
-
-.price-val.accent {
-  color: #6c63ff;
-}
-
-.price-val.pos {
-  color: #10b981;
-}
-
-.price-val.neg {
-  color: #ef4444;
-}
-
-.price-sep {
-  font-size: .75rem;
-  color: #ddd;
-  margin-top: .8rem;
-}
-
-.desc {
+.barcode-line {
   margin: 0;
-  font-size: .82rem;
-  color: #666;
-  line-height: 1.4;
-  padding: 0 1rem;
-  flex: 1;
-}
-
-.card-footer {
+  padding: .2rem 1rem .65rem;
+  font-size: .73rem;
+  color: #bbb;
+  font-family: monospace;
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  padding: .65rem 1rem;
-  margin-top: .4rem;
-  flex-wrap: wrap;
-  gap: .4rem;
+  gap: .3rem;
 }
 
-.admin-actions {
+/* ── Pagination ──────────────────────────────────────── */
+.pagination {
   display: flex;
+  align-items: center;
+  justify-content: center;
   gap: .4rem;
+  margin-top: 1.5rem;
+  flex-wrap: wrap;
 }
-
-.mov-btn {
-  font-size: .78rem;
-  padding: .25rem .6rem;
+.page-btn {
+  min-width: 2rem;
+  height: 2rem;
+  padding: 0 .6rem;
   border: 1px solid #ddd;
   border-radius: 6px;
   background: white;
+  font-size: .875rem;
   cursor: pointer;
-  color: #555;
+  transition: background .15s, border-color .15s, color .15s;
 }
-
-.mov-btn:hover {
-  border-color: #6c63ff;
-  color: #6c63ff;
-}
-
-.edit-btn {
-  padding: .25rem .6rem;
-  font-size: .8rem;
-  border: 1px solid #6c63ff;
-  color: #6c63ff;
-  background: transparent;
-  border-radius: 6px;
-  cursor: pointer;
-}
-
-.edit-btn:hover {
-  background: #6c63ff;
-  color: white;
-}
-
-.del-btn {
-  padding: .25rem .6rem;
-  font-size: .8rem;
-  border: 1px solid #ef4444;
-  color: #ef4444;
-  background: transparent;
-  border-radius: 6px;
-  cursor: pointer;
-}
-
-.del-btn:hover {
-  background: #ef4444;
-  color: white;
-}
+.page-btn:hover:not(:disabled) { border-color: #6c63ff; color: #6c63ff; }
+.page-btn.active  { background: #6c63ff; color: white; border-color: #6c63ff; }
+.page-btn:disabled { opacity: .35; cursor: not-allowed; }
+.page-ellipsis { color: #aaa; font-size: .875rem; padding: 0 .25rem; }
+.page-info { font-size: .8rem; color: #888; margin-left: .5rem; }
 
 /* ── Shared ──────────────────────────────────────────── */
 .empty {
@@ -983,53 +874,72 @@ onMounted(() => {
   color: #888;
   margin-top: 3rem;
 }
-
 .upload-error {
   text-align: center;
   color: #ef4444;
   font-size: .875rem;
   margin-top: .5rem;
 }
-
-/* ── Overlay ─────────────────────────────────────────── */
-.overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, .45);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 100;
-  padding: 1rem;
+.sel {
+  padding: .5rem .7rem;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  font-size: .9rem;
+  background: white;
+  font-family: inherit;
 }
+.sel:focus { outline: none; border-color: #6c63ff; }
 
-/* ── Product form modal ──────────────────────────────── */
+/* ── Card footer ─────────────────────────────────────── */
+.card-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: .5rem 1rem .7rem;
+  border-top: 1px solid #f3f3f3;
+  margin-top: auto;
+}
+.edit-btn {
+  padding: .3rem .75rem;
+  font-size: .8rem;
+  border: 1px solid #6c63ff;
+  color: #6c63ff;
+  background: transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.edit-btn:hover { background: #6c63ff; color: white; }
+
+/* ── Edit modal ──────────────────────────────────────── */
 .modal {
   background: white;
   border-radius: 12px;
-  padding: 1.5rem;
   width: 100%;
-  max-width: 560px;
-  max-height: 90vh;
+  max-width: 600px;
+  max-height: 92vh;
   overflow-y: auto;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, .15);
+  box-shadow: 0 8px 32px rgba(0,0,0,.18);
+  display: flex;
+  flex-direction: column;
 }
-
-.modal h2 {
-  margin: 0 0 1rem;
-  font-size: 1.15rem;
-  color: #1a1a2e;
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1.25rem 1.5rem 0;
+  flex-shrink: 0;
 }
-
+.modal-header h2 { margin: 0; font-size: 1.1rem; color: #1a1a2e; }
 .form-body {
   display: flex;
   flex-direction: column;
   gap: .1rem;
+  padding: .75rem 1.5rem 1.5rem;
+  overflow-y: auto;
 }
-
 .form-section-title {
-  margin: .8rem 0 .3rem;
-  font-size: .7rem;
+  margin: .85rem 0 .3rem;
+  font-size: .68rem;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: .06em;
@@ -1037,25 +947,14 @@ onMounted(() => {
   border-bottom: 1px solid #f0f0f0;
   padding-bottom: .3rem;
 }
-
-.form-section-title:first-child {
-  margin-top: 0;
-}
-
 label {
   display: block;
-  margin: .5rem 0 .2rem;
+  margin: .4rem 0 .15rem;
   font-size: .875rem;
   color: #555;
 }
-
-.req {
-  color: #ef4444;
-}
-
-input,
-textarea,
-.sel {
+.req { color: #ef4444; }
+input[type=text], input[type=number], input:not([type]), textarea, .sel {
   width: 100%;
   padding: .5rem .7rem;
   border: 1px solid #ddd;
@@ -1065,30 +964,31 @@ textarea,
   font-family: inherit;
   background: white;
 }
-
-input:focus,
-textarea:focus,
-.sel:focus {
+input:focus, textarea:focus, .sel:focus {
   outline: none;
   border-color: #6c63ff;
 }
-
-textarea {
-  resize: vertical;
+textarea { resize: vertical; }
+.row2 { display: grid; grid-template-columns: 1fr 1fr; gap: .75rem; }
+.row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: .75rem; }
+.flags-col {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: .45rem;
+  padding-bottom: .15rem;
 }
-
-.row2 {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: .75rem;
+.flag-label {
+  display: flex;
+  align-items: center;
+  gap: .4rem;
+  font-size: .875rem;
+  color: #555;
+  cursor: pointer;
+  user-select: none;
+  margin: 0;
 }
-
-.row3 {
-  display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
-  gap: .75rem;
-}
-
+.flag-label input { width: auto; cursor: pointer; }
 .margin-preview {
   font-size: .82rem;
   color: #666;
@@ -1097,55 +997,15 @@ textarea {
   border-radius: 6px;
   margin-top: .25rem;
 }
-
-.pos {
-  color: #10b981;
-}
-
-.neg {
-  color: #ef4444;
-}
-
-.error {
-  color: #e53e3e;
-  font-size: .875rem;
-  margin: .5rem 0 0;
-}
-
-.input-with-btn {
-  display: flex;
-  gap: .4rem;
-}
-
-.input-with-btn input {
-  flex: 1;
-}
-
-.gen-btn {
-  padding: .5rem .65rem;
-  font-size: .75rem;
-  font-weight: 600;
-  white-space: nowrap;
-  background: #f0eeff;
-  color: #6c63ff;
-  border: 1px solid #c4beff;
-  border-radius: 8px;
-  cursor: pointer;
-  flex-shrink: 0;
-}
-
-.gen-btn:hover {
-  background: #6c63ff;
-  color: white;
-}
-
+.pos { color: #10b981; }
+.neg { color: #ef4444; }
+.error { color: #e53e3e; font-size: .875rem; margin: .4rem 0 0; }
 .modal-footer {
   display: flex;
   justify-content: flex-end;
   gap: .6rem;
   margin-top: 1.25rem;
 }
-
 .cancel-btn {
   padding: .55rem 1rem;
   background: transparent;
@@ -1154,7 +1014,6 @@ textarea {
   cursor: pointer;
   font-size: .9rem;
 }
-
 .modal-footer button[type=submit] {
   padding: .55rem 1.2rem;
   background: #6c63ff;
@@ -1165,227 +1024,59 @@ textarea {
   font-weight: 600;
   cursor: pointer;
 }
+.modal-footer button[type=submit]:disabled { opacity: .6; cursor: not-allowed; }
 
-.modal-footer button[type=submit]:disabled {
-  opacity: .6;
-  cursor: not-allowed;
-}
-
-/* ── Movements modal ─────────────────────────────────── */
-.mov-modal {
-  max-width: 680px;
-  padding: 0;
-  overflow: hidden;
+/* ── Overlay ─────────────────────────────────────────── */
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.45);
   display: flex;
-  flex-direction: column;
-  max-height: 88vh;
-}
-
-.mov-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  padding: 1.25rem 1.5rem 1rem;
-  border-bottom: 1px solid #f0f0f0;
-  background: #fafbff;
-  flex-shrink: 0;
-}
-
-.mov-header h2 {
-  margin: 0 0 .2rem;
-  font-size: 1.1rem;
-  color: #1a1a2e;
-}
-
-.mov-subtitle {
-  margin: 0;
-  font-size: .82rem;
-  color: #888;
-}
-
-.close-btn {
-  background: none;
-  border: none;
-  font-size: 1.1rem;
-  cursor: pointer;
-  color: #aaa;
-  padding: .2rem .4rem;
-  border-radius: 4px;
-}
-
-.close-btn:hover {
-  background: #f0f0f0;
-  color: #555;
-}
-
-.mov-form {
-  display: flex;
-  gap: .5rem;
   align-items: center;
-  padding: .9rem 1.5rem;
-  border-bottom: 1px solid #f0f0f0;
-  flex-wrap: wrap;
-  flex-shrink: 0;
-}
-
-.sel-sm {
-  width: auto;
-  min-width: 130px;
-  padding: .4rem .6rem;
-  font-size: .85rem;
-}
-
-.mov-qty {
-  width: 90px;
-  padding: .4rem .6rem;
-  font-size: .85rem;
-}
-
-.mov-reason {
-  flex: 1;
-  min-width: 120px;
-  padding: .4rem .6rem;
-  font-size: .85rem;
-}
-
-.mov-submit {
-  padding: .4rem .9rem;
-  background: #6c63ff;
-  color: white;
-  border: none;
-  border-radius: 8px;
-  font-size: .85rem;
-  font-weight: 600;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.mov-submit:disabled {
-  opacity: .6;
-  cursor: not-allowed;
-}
-
-.mov-list {
-  overflow-y: auto;
-  flex: 1;
-}
-
-.mov-empty {
-  text-align: center;
-  color: #aaa;
-  padding: 2rem;
-}
-
-.mov-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: .83rem;
-}
-
-.mov-table th {
-  padding: .55rem 1rem;
-  text-align: left;
-  font-size: .72rem;
-  font-weight: 700;
-  color: #888;
-  text-transform: uppercase;
-  letter-spacing: .04em;
-  border-bottom: 1px solid #f0f0f0;
-  background: #fafafa;
-}
-
-.mov-table td {
-  padding: .55rem 1rem;
-  border-bottom: 1px solid #f8f8f8;
-  vertical-align: middle;
-}
-
-.mov-table tbody tr:last-child td {
-  border-bottom: none;
-}
-
-.mov-table tbody tr:hover {
-  background: #fafafa;
-}
-
-.mov-date {
-  color: #aaa;
-  white-space: nowrap;
-}
-
-.mov-badge {
-  display: inline-block;
-  font-size: .72rem;
-  font-weight: 600;
-  padding: .15rem .5rem;
-  border-radius: 20px;
-  white-space: nowrap;
-}
-
-.mov-qty-cell {
-  font-weight: 700;
-  font-size: .9rem;
-}
-
-.mov-reason-cell {
-  color: #555;
-}
-
-.mov-user {
-  color: #aaa;
-  font-size: .78rem;
+  justify-content: center;
+  z-index: 100;
+  padding: 1rem;
 }
 
 /* ── Barcode scanner ─────────────────────────────────── */
-.scanner-overlay {
-  z-index: 200;
-}
-
+.scanner-overlay { z-index: 200; }
 .scanner-box {
   background: #1a1a2e;
   border-radius: 14px;
   overflow: hidden;
   width: min(300px, 80vw);
-  box-shadow: 0 12px 40px rgba(0, 0, 0, .5);
+  box-shadow: 0 12px 40px rgba(0,0,0,.5);
 }
-
 .scanner-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
   padding: .85rem 1.1rem;
-  color: rgba(255, 255, 255, .85);
+  color: rgba(255,255,255,.85);
   font-size: .85rem;
 }
-
 .scanner-header .close-btn {
   background: none;
   border: none;
-  color: rgba(255, 255, 255, .6);
+  color: rgba(255,255,255,.6);
   font-size: 1rem;
   cursor: pointer;
   padding: .2rem .4rem;
   border-radius: 4px;
 }
-
-.scanner-header .close-btn:hover {
-  color: white;
-}
-
+.scanner-header .close-btn:hover { color: white; }
 .scanner-viewport {
   position: relative;
   width: 100%;
   aspect-ratio: 4/3;
   background: black;
 }
-
 .scanner-video {
   width: 100%;
   height: 100%;
   object-fit: cover;
   display: block;
 }
-
 .scanner-aim {
   position: absolute;
   inset: 0;
@@ -1394,10 +1085,9 @@ textarea {
   height: 38%;
   border: 2.5px solid #6c63ff;
   border-radius: 10px;
-  box-shadow: 0 0 0 9999px rgba(0, 0, 0, .45);
+  box-shadow: 0 0 0 9999px rgba(0,0,0,.45);
   pointer-events: none;
 }
-
 .scanner-footer {
   display: flex;
   flex-direction: column;
@@ -1405,12 +1095,7 @@ textarea {
   gap: .5rem;
   padding: .85rem 1rem;
 }
-
-.scanner-actions {
-  display: flex;
-  gap: .6rem;
-}
-
+.scanner-actions { display: flex; gap: .6rem; }
 .scanner-capture-btn {
   padding: .55rem 1.4rem;
   background: #6c63ff;
@@ -1420,45 +1105,30 @@ textarea {
   font-size: .88rem;
   font-weight: 600;
   cursor: pointer;
-  transition: opacity .15s;
 }
-
-.scanner-capture-btn:disabled {
-  opacity: .45;
-  cursor: not-allowed;
-}
-
+.scanner-capture-btn:disabled { opacity: .45; cursor: not-allowed; }
 .scanner-auto-btn {
   padding: .55rem 1.1rem;
   background: transparent;
-  color: rgba(255, 255, 255, .7);
-  border: 1.5px solid rgba(255, 255, 255, .25);
+  color: rgba(255,255,255,.7);
+  border: 1.5px solid rgba(255,255,255,.25);
   border-radius: 10px;
   font-size: .88rem;
   font-weight: 600;
   cursor: pointer;
   transition: background .15s, color .15s, border-color .15s;
 }
-
-.scanner-auto-btn:hover {
-  border-color: rgba(255, 255, 255, .5);
-  color: white;
+.scanner-auto-btn:hover         { border-color: rgba(255,255,255,.5); color: white; }
+.scanner-auto-btn.active        { background: #ef4444; border-color: #ef4444; color: white; }
+.scanner-not-found { margin: 0; font-size: .78rem; color: #f87171; }
+.close-btn {
+  background: none;
+  border: none;
+  font-size: 1.1rem;
+  cursor: pointer;
+  color: #aaa;
+  padding: .2rem .4rem;
+  border-radius: 4px;
 }
-
-.scanner-auto-btn.active {
-  background: #ef4444;
-  border-color: #ef4444;
-  color: white;
-}
-
-.scanner-not-found {
-  margin: 0;
-  font-size: .78rem;
-  color: #f87171;
-}
-
-.scan-btn {
-  font-size: .9rem;
-  padding: .45rem .55rem !important;
-}
+.close-btn:hover { background: #f0f0f0; color: #555; }
 </style>

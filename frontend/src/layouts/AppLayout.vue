@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, watch, ref, onMounted } from 'vue';
+import { computed, watch, ref, onMounted, onUnmounted } from 'vue';
 import { useRoute, useRouter, RouterLink } from 'vue-router';
 import { useAuthStore } from '../stores/auth';
 import { useColumnSettingsStore } from '../stores/columnSettings';
 import { PG_GROUPS, type NavGroup, type NavChild } from '../data/pgGroups';
+import { usePhotoInboxStore } from '../stores/photoInbox';
 import HelpBot from '../components/HelpBot.vue';
 
 const route  = useRoute();
@@ -92,9 +93,26 @@ watch(() => route.path, (path) => {
   localStorage.setItem('lastRoute', path);
 }, { immediate: true });
 
-onMounted(() => colCfg.fetchAllHidden());
+// ── Photo inbox WebSocket (desktop role) ─────────────────────────────────────
+const inbox = usePhotoInboxStore();
+
+onMounted(() => {
+  colCfg.fetchAllHidden();
+  if (auth.token) inbox.connect(auth.token, 'desktop');
+});
+
+onUnmounted(() => inbox.disconnect());
+
+watch(() => auth.token, (t) => {
+  if (t) inbox.connect(t, 'desktop');
+  else   inbox.disconnect();
+});
+
+// ── Notification dismiss ──────────────────────────────────────────────────────
+function dismissPhoto(id: number) { inbox.dismiss(id); }
 
 function logout() {
+  inbox.disconnect();
   auth.logout();
   router.push('/login');
 }
@@ -155,6 +173,17 @@ function logout() {
           <span class="nav-icon">{{ item.icon }}</span>
           <span>{{ item.label }}</span>
         </RouterLink>
+
+        <!-- Camera (always visible — useful on mobile) -->
+        <RouterLink
+          :to="`${base}/camera`"
+          class="nav-item camera-nav"
+          :class="{ active: route.path === `${base}/camera` }"
+        >
+          <span class="nav-icon">📷</span>
+          <span>Caméra</span>
+          <span v-if="inbox.mobileOnline" class="online-dot" title="Mobile connecté"></span>
+        </RouterLink>
       </nav>
 
       <div class="user-section">
@@ -186,6 +215,26 @@ function logout() {
     </main>
 
     <HelpBot />
+
+    <!-- ── Photo inbox toasts ──────────────────────────────────────────── -->
+    <Teleport to="body">
+      <div class="photo-toasts">
+        <TransitionGroup name="toast">
+          <div
+            v-for="photo in inbox.photos"
+            :key="photo.id"
+            class="photo-toast"
+          >
+            <img :src="photo.dataUrl" class="toast-thumb" alt="Photo mobile" />
+            <div class="toast-body">
+              <p class="toast-title">📷 Photo reçue depuis le mobile</p>
+              <p class="toast-time">{{ photo.at.toLocaleTimeString() }}</p>
+            </div>
+            <button class="toast-close" @click="dismissPhoto(photo.id)">✕</button>
+          </div>
+        </TransitionGroup>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -326,4 +375,71 @@ function logout() {
 
 /* ── Content ──────────────────────────────────────── */
 .content { flex: 1; overflow-y: auto; min-width: 0; }
+
+/* ── Camera nav item ──────────────────────────────── */
+.camera-nav { position: relative; }
+.online-dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: #10b981;
+  margin-left: auto;
+  flex-shrink: 0;
+  box-shadow: 0 0 4px #10b981;
+}
+
+/* ── Photo toasts ─────────────────────────────────── */
+.photo-toasts {
+  position: fixed;
+  bottom: 1.5rem;
+  right: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: .65rem;
+  z-index: 9999;
+  pointer-events: none;
+}
+
+.photo-toast {
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+  background: white;
+  border-radius: 12px;
+  padding: .65rem .75rem;
+  box-shadow: 0 4px 24px rgba(0,0,0,.18);
+  border-left: 4px solid #6366f1;
+  max-width: 320px;
+  pointer-events: all;
+  cursor: default;
+}
+
+.toast-thumb {
+  width: 52px;
+  height: 52px;
+  object-fit: cover;
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+
+.toast-body { flex: 1; overflow: hidden; }
+.toast-title { margin: 0 0 .15rem; font-size: .82rem; font-weight: 700; color: #1e293b; }
+.toast-time  { margin: 0; font-size: .73rem; color: #94a3b8; }
+
+.toast-close {
+  background: none;
+  border: none;
+  color: #94a3b8;
+  cursor: pointer;
+  font-size: .85rem;
+  padding: .2rem;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.toast-close:hover { color: #475569; }
+
+/* Transitions */
+.toast-enter-active { transition: all .25s ease; }
+.toast-leave-active { transition: all .2s ease; }
+.toast-enter-from   { opacity: 0; transform: translateY(12px); }
+.toast-leave-to     { opacity: 0; transform: translateX(20px); }
 </style>
