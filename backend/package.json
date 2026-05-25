@@ -6,7 +6,7 @@
     "build": "tsc",
     "build:frontend": "npm run build --prefix ../frontend",
     "start": "node dist/index.js",
-    "gen-certs": "if not exist certs mkdir certs && openssl req -x509 -newkey rsa:2048 -keyout certs/server.key -out certs/server.crt -days 825 -nodes -subj \"/CN=62.34.58.30\" -addext \"subjectAltName=IP:62.34.58.30,IP:127.0.0.1,IP:172.20.10.3,IP:192.168.137.1,DNS:localhost\"",
+    "gen-certs": "if not exist certs mkdir certs && openssl req -x509 -newkey rsa:2048 -keyout certs/server.key -out certs/server.crt -days 825 -nodes -subj \"/CN=62.34.58.30\" -addext \"subjectAltName=IP:62.34.58.30,IP:127.0.0.1,IP:172.20.10.3,IP:192.168.137.1,IP:192.168.1.74,DNS:localhost\"",
     "service:build": "npm run build:frontend && tsc && node scripts/post-build-service.mjs"
   },
   "dependencies": {

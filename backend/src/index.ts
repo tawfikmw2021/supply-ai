@@ -60,36 +60,7 @@ const app = express();
 const HTTP_PORT  = Number(process.env.PORT       ?? 3100);
 const HTTPS_PORT = Number(process.env.HTTPS_PORT ?? 3543);
 
-// Build the allowed-origins list: include HTTP + HTTPS for every known host
-function bothProtocols(origin: string) {
-  const bare = origin.replace(/^https?:\/\//, '');
-  return [`http://${bare}`, `https://${bare}`];
-}
-
-const ALLOWED_ORIGINS = [
-  ...bothProtocols('62.34.58.30:3315'),
-  ...bothProtocols(`62.34.58.30:${HTTP_PORT}`),
-  ...bothProtocols(`62.34.58.30:${HTTPS_PORT}`),
-  ...bothProtocols('62.34.58.30'),
-  ...bothProtocols('localhost:5173'),
-  ...bothProtocols('localhost:5174'),
-  ...bothProtocols('127.0.0.1:5173'),
-  ...bothProtocols('172.20.10.3:5173'),
-  ...bothProtocols('172.20.10.3:5174'),
-  ...bothProtocols(`172.20.10.3:${HTTP_PORT}`),
-  ...bothProtocols(`172.20.10.3:${HTTPS_PORT}`),
-  ...bothProtocols('192.168.137.1:5173'),
-  ...bothProtocols('192.168.137.1:5174'),
-  ...bothProtocols(`192.168.137.1:${HTTP_PORT}`),
-  ...bothProtocols(`192.168.137.1:${HTTPS_PORT}`),
-  // Any extra origins from env (comma-separated)
-  ...(process.env.ALLOWED_ORIGINS?.split(',').map(o => o.trim()).filter(Boolean) ?? []),
-];
-
-app.use(cors({
-  origin: (origin, cb) => cb(null, !origin || ALLOWED_ORIGINS.includes(origin)),
-  credentials: true,
-}));
+app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
 app.use('/uploads/documents', (_req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');

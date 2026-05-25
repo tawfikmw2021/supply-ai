@@ -1,4 +1,4 @@
-export interface NavChild { label: string; table: string }
+export interface NavChild { label: string; table: string; path?: string }
 export interface NavGroup { id: string; label: string; icon: string; children: NavChild[]; adminOnly?: boolean }
 
 export const PG_GROUPS: NavGroup[] = [

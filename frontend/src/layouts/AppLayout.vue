@@ -3,7 +3,7 @@ import { computed, watch, ref, onMounted } from 'vue';
 import { useRoute, useRouter, RouterLink } from 'vue-router';
 import { useAuthStore } from '../stores/auth';
 import { useColumnSettingsStore } from '../stores/columnSettings';
-import { PG_GROUPS } from '../data/pgGroups';
+import { PG_GROUPS, type NavGroup, type NavChild } from '../data/pgGroups';
 import HelpBot from '../components/HelpBot.vue';
 
 const route  = useRoute();
@@ -27,10 +27,14 @@ const pgGroups = computed(() => PG_GROUPS);
 
 // ── Flat legacy nav items (non-PG screens) ────────────────────────────────────
 const legacyItems = computed<NavFlat[]>(() => [
+    { path: `${base.value}/invoices`,      label: 'Factures',  icon: '🏷️', adminOnly: false },
   { path: `${base.value}/loaders`,         label: 'Chargeurs',    icon: '📥', key: 'loaders' },
   { path: `${base.value}/documents`,       label: 'Documents',    icon: '📄', key: 'documents' },
   { path: `${base.value}/column-settings`, label: 'Colonnes',     icon: '🗃️', adminOnly: true },
   { path: `${base.value}/categories`,      label: 'Familles DB',  icon: '🏷️', adminOnly: true },
+    { path: `${base.value}/deliveries`,      label: 'Livraisons',  icon: '🏷️', adminOnly: false },
+  { path: `${base.value}/products`,      label: 'Articles',  icon: '🏷️', adminOnly: false },
+
   { path: `${base.value}/dashboard`,      label: 'Dashboard',  icon: '', adminOnly: true },
   { path: `${base.value}/users`,           label: 'Utilisateurs', icon: '👤', adminOnly: true },
   { path: `${base.value}/templates`,       label: 'Modèles',      icon: '🖨️', adminOnly: true },
