@@ -1,0 +1,5 @@
+
+    {
+  "claudeCode.autoApproveTools": ["bash", "computer"],
+  "python.terminal.useEnvFile": true
+}

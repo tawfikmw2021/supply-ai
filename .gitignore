@@ -1,0 +1,14 @@
+node_modules/
+dist/
+dist-old/
+electron/dist/
+#*.sqlite
+#backend/certs/
+#backend/.env
+#frontend/.env.production
+dist-service/
+
+backend/public/
+backend/data
+.git-old
+supply.dump*

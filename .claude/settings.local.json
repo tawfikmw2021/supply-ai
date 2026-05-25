@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rm -rf backend/node_modules/better-sqlite3/build)",
+      "Bash(npm run *)",
+      "Bash(where 7z)",
+      "Bash(where 7za)",
+      "Bash(npm install *)",
+      "Bash(npm rebuild *)",
+      "Bash(npx tsc *)"
+    ]
+  }
+}

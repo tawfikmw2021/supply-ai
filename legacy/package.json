@@ -1,0 +1,63 @@
+{
+  "name": "supply-ai-electron",
+  "version": "1.0.0",
+  "description": "Electron wrapper (legacy — standalone service is the primary distribution)",
+  "main": "electron/dist/main.js",
+  "scripts": {
+    "compile": "tsc -p electron/tsconfig.json",
+    "rebuild": "electron-rebuild -f -w better-sqlite3 --module-dir ../backend && electron-rebuild -f -w better-sqlite3",
+    "start": "npm run compile && npm run rebuild && electron .",
+    "pack": "npm run build:backend && npm run compile && npm run rebuild && electron-builder --dir --projectDir ..",
+    "dist": "npm run build:frontend && npm run build:backend && npm run compile && npm run rebuild && electron-builder --projectDir ..",
+    "build:frontend": "npm run build --prefix ../frontend",
+    "build:backend": "npm run build --prefix ../backend"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^4.0.4",
+    "electron": "^36.0.0",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.4.5"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.95.2",
+    "@techstark/opencv-js": "^4.12.0-release.1",
+    "bcryptjs": "^2.4.3",
+    "better-sqlite3": "^12.10.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "electron-updater": "^6.3.9",
+    "express": "^4.22.2",
+    "jsonwebtoken": "^9.0.3",
+    "multer": "^2.1.1",
+    "sharp": "^0.34.5",
+    "swagger-jsdoc": "^6.2.8",
+    "swagger-ui-express": "^5.0.1",
+    "zxing-wasm": "^3.0.3"
+  },
+  "build": {
+    "appId": "com.supply-ai.app",
+    "productName": "Supply AI",
+    "files": [
+      "legacy/electron/dist/**/*",
+      "backend/dist/**/*",
+      "backend/public/**/*",
+      "backend/node_modules/**/*",
+      "legacy/node_modules/**/*"
+    ],
+    "linux":  { "target": ["AppImage"] },
+    "win":    { "target": ["portable"] },
+    "mac":    { "target": ["dmg"] },
+    "publish": {
+      "provider": "github",
+      "owner": "lanouar",
+      "repo": "supply-ai",
+      "releaseType": "release"
+    },
+    "asarUnpack": [
+      "legacy/node_modules/sharp/**/*",
+      "legacy/node_modules/@img/**/*",
+      "legacy/node_modules/better-sqlite3/**/*",
+      "backend/node_modules/better-sqlite3/**/*"
+    ]
+  }
+}

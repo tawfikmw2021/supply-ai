@@ -1,0 +1,44 @@
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "node scripts/dev-backend.mjs",
+    "build": "tsc",
+    "build:frontend": "npm run build --prefix ../frontend",
+    "start": "node dist/index.js",
+    "gen-certs": "if not exist certs mkdir certs && openssl req -x509 -newkey rsa:2048 -keyout certs/server.key -out certs/server.crt -days 825 -nodes -subj \"/CN=62.34.58.30\" -addext \"subjectAltName=IP:62.34.58.30,IP:127.0.0.1,IP:172.20.10.3,IP:192.168.137.1,DNS:localhost\"",
+    "service:build": "npm run build:frontend && tsc && node scripts/post-build-service.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.95.1",
+    "@techstark/opencv-js": "^4.12.0-release.1",
+    "@types/sharp": "^0.31.1",
+    "bcryptjs": "^2.4.3",
+    "better-sqlite3": "^12.10.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^2.1.1",
+    "pg": "^8.21.0",
+    "sharp": "^0.34.5",
+    "swagger-jsdoc": "^6.2.8",
+    "swagger-ui-express": "^5.0.1",
+    "zxing-wasm": "^3.0.3"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/jsonwebtoken": "^9.0.6",
+    "@types/multer": "^2.1.0",
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.20.0",
+    "@types/swagger-jsdoc": "^6.0.4",
+    "@types/swagger-ui-express": "^4.1.8",
+    "nodemon": "^3.1.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5"
+  }
+}

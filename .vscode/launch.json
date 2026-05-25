@@ -1,0 +1,36 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+  "type": "node",
+  "request": "attach",
+  "name": "Attach to Electron backend",
+  "port": 9229,
+  "restart": true
+},
+    {
+      "name": "Debug Backend (ts-node)",
+      "type": "node",
+      "request": "launch",
+      "cwd": "${workspaceFolder}/backend",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "--require",
+        "ts-node/register"
+      ],
+      "args": ["src/index.ts"],
+      "env": {
+        "TS_NODE_PROJECT": "${workspaceFolder}/backend/tsconfig.json"
+      },
+      "envFile": "${workspaceFolder}/backend/.env",
+      "sourceMaps": true,
+      "outFiles": ["${workspaceFolder}/backend/dist/**/*.js"],
+      "resolveSourceMapLocations": [
+        "${workspaceFolder}/backend/**",
+        "!**/node_modules/**"
+      ],
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**", "**/node_modules/**"]
+    }
+  ]
+}
